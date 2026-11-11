@@ -200,3 +200,83 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: dist/${{ needs.build.outputs.archive_name }}
+
+  payload_catalog:
+    name: Publish Payload Manager source
+    needs: build
+    if: github.ref == 'refs/heads/1.7' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: payload-manager-publish
+      cancel-in-progress: false
+    steps:
+      - name: Download compiled payload archive
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.archive_name }}
+          path: dist
+
+      - name: Prepare catalog and verify ELF
+        env:
+          ARCHIVE_NAME: ${{ needs.build.outputs.archive_name }}
+        run: |
+          python3 - <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import zipfile
+
+          with zipfile.ZipFile(pathlib.Path("dist") / os.environ["ARCHIVE_NAME"]) as archive:
+              candidates = [n for n in archive.namelist()
+                            if pathlib.PurePosixPath(n).name == "shadowmountplus.elf"]
+              if len(candidates) != 1:
+                  raise SystemExit("Expected exactly one shadowmountplus.elf")
+              payload = archive.read(candidates[0])
+          if not payload.startswith(b"\x7fELF"):
+              raise SystemExit("Payload is not an ELF binary")
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run = os.environ["GITHUB_RUN_NUMBER"]
+          attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+          filename = f"shadowmountplus-{os.environ['GITHUB_SHA'][:12]}-{run}-{attempt}.elf"
+          out = pathlib.Path("publish")
+          out.mkdir()
+          (out / filename).write_bytes(payload)
+          catalog = {
+              "name": "dviree ShadowMount Plus ZSTD",
+              "payloads": [{
+                  "id": "shadowmountplus-zstd",
+                  "name": "ShadowMount Plus ZSTD (dviree)",
+                  "filename": "shadowmountplus.elf",
+                  "url": f"https://github.com/{repo}/releases/download/payload-manager/{filename}",
+                  "version": f"1.7.0-dev.{run}.{attempt}",
+                  "last_update": datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
+                  "description": "Development build of dviree's ShadowMountPluszstd fork.",
+                  "category": "Utilities",
+                  "checksum": hashlib.sha256(payload).hexdigest(),
+                  "author": "dviree / Drakmor",
+                  "source": f"https://github.com/{repo}"
+              }]
+          }
+          (out / "payloads.json").write_text(json.dumps(catalog, indent=2) + "\n")
+          PY
+
+      - name: Publish ELF and then catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view payload-manager >/dev/null 2>&1; then
+            gh release create payload-manager \
+              --target "$GITHUB_SHA" \
+              --title "Payload Manager source - development builds" \
+              --notes "Custom Payload Manager source for dviree/ShadowMountPluszstd. Add the payloads.json release asset URL in Settings > Manage Sources. Builds are development snapshots, not upstream stable releases." \
+              --prerelease
+          fi
+          gh release upload payload-manager publish/*.elf
+          gh release upload payload-manager publish/payloads.json --clobber
