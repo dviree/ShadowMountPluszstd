@@ -26,6 +26,15 @@ def main():
         start = smb.index('static bool safe_components(')
         end = smb.index('size_t sm_smb_snapshot(', start)
         (build / 'smb_validation.inc').write_text(smb[start:end], encoding='utf-8')
+        patches = (root / 'src/sm_patch_sources.c').read_text(encoding='utf-8')
+        presets = re.search(r'^const sm_patch_source_t sm_patch_source_presets\[\] = \{.*?^  \};',
+                            patches, re.MULTILINE | re.DOTALL)
+        valid = re.search(r'^bool sm_patch_source_valid\([^;{]*\) \{.*?^\}',
+                          patches, re.MULTILINE | re.DOTALL)
+        if not presets or not valid:
+            raise RuntimeError('Cannot find patch source helpers')
+        (build / 'patch_source_helpers.inc').write_text(
+            presets.group(0) + '\n' + valid.group(0) + '\n', encoding='utf-8')
         binary = build / 'config'
         command = shlex.split(os.environ.get('CC', 'cc')) + [
             '-std=gnu11', '-O1', '-g', '-pthread', '-Wall', '-Wextra', '-Werror',
@@ -56,6 +65,7 @@ def main():
         command[command.index(str(root / 'tests/test_runtime_config.c'))] = str(root / 'tests/test_config_watch.c')
         subprocess.run(command, check=True)
         subprocess.run([str(binary)], check=True, timeout=30)
+
 
 
 if __name__ == '__main__':

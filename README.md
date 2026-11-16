@@ -240,14 +240,16 @@ Most common options are available through the web interface. For complete accept
 
 | Section | Examples | What they control |
 | --- | --- | --- |
-| `[general]` | `debug`, `quiet_mode`, `language` | Logs, notifications, localization |
+| `[general]` | `debug`, `quiet_mode`, `language`, `child_mode` | Logs, notifications, localization, hiding file operations |
 | `[api]` | `enabled`, `bind_address`, `port` | Web interface/API access |
 | `[scan]` | `path`, `depth`, `interval_seconds` | Library discovery |
 | `[mount]` | `mode`, `persistent_images`, `exfat_backend`, `ufs_backend` | Default image-mount behavior |
 | `[library]` | `install_all`, `remove_missing`, `remove_delay_seconds` | Registration and missing-title cleanup |
+| `[ps4]` | `force_pro`, `cpu_boost`, `gpu_boost` | Defaults for PS4 games |
 | `[fakelib]` | `enabled`, `default_mode`, `global_enabled`, `global_path` | Fakelib overlays |
 | `[emulators]` | `update_enabled`, `path`, `auto_update_ampr` | Optional emulator-library updates |
 | `[fan]` | `target_temperature` | Optional fan target adjustment |
+| `[patches]` | `update_interval_hours`, repeatable `source` | XML game patch and cheat catalogs |
 | `[smb:NAME]` | `path`, `username`, `password`, `active` | Named network shares |
 
 New configurations use `[config]` with `version = 2`. If a setting is omitted, its default applies. **Do not remove the version marker.** Profile changes take effect on the next game launch or image mount, rather than interrupting a running game.
@@ -268,6 +270,8 @@ ignore_global_fakelib = on
 mount_mode = ro
 sector_size = 512
 ```
+
+PS4 titles can also override `ps4_pro`, `ps4_cpu_boost`, `ps4_gpu_boost`, `ps4_8gb`, `ps4_120hz`, and `ps4_gpu_clock` in the same `[game:...]` section; see [profiles.ini.example](profiles.ini.example). `ps4_120hz` requests supported 120 Hz output without unlocking FPS, and `ps4_gpu_clock` accepts `default` or `2350`.
 
 Game fakelib modes include `default`, `full`, `emulators`, and `disabled`. Image mount modes include `default`, `ro` (read-only), and `rw` (read-write). Image rules match **filenames**, not full paths, so images with the same filename on different drives share a profile.
 

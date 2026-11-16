@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/types.h>
 #include "sm_limits.h"
 
 // Start the shared game lifecycle watcher used by runtime game features.
@@ -13,6 +14,10 @@ void wake_game_lifecycle_watcher(void);
 void stop_game_lifecycle_watcher(void);
 // Return true when a supported game is currently being tracked as running.
 bool sm_game_lifecycle_has_active_game(void);
+// Read the live game identity; includes a read-only process fallback after SM+
+// was restarted while a game was already running. Does not publish runtime state.
+bool sm_game_lifecycle_active_title(char title_id[MAX_TITLE_ID]);
+pid_t sm_game_lifecycle_active_process(char title_id[MAX_TITLE_ID]);
 // Copy the protected live title even when returning false, or an empty string
 // when no confirmed live title is available. Confirmed games allow unrelated
 // work regardless of focus. Return false during a pending exit/handoff or
@@ -23,6 +28,10 @@ bool sm_game_lifecycle_background_title(char title_id[MAX_TITLE_ID]);
 void sm_game_lifecycle_note_app_focus(uint32_t app_id);
 // Invalidate focus information used by per-game fan policy.
 void sm_game_lifecycle_invalidate_app_focus(void);
+// Queue a VideoOut loader signal without touching watcher-owned game state.
+bool sm_game_lifecycle_note_video_ready(pid_t pid);
+// Queue a PID returned by ShellCore's Spawn2 call for early VideoOut setup.
+bool sm_game_lifecycle_note_process_spawned(pid_t pid);
 // Ensure the shared watcher is running for runtime game-state tracking.
 bool refresh_game_lifecycle_watcher(void);
 

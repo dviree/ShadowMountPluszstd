@@ -1,5 +1,6 @@
 #include "host_platform.h"
 #include "sm_limits.h"
+#include "sm_shellcore_protocol_defs.h"
 #include "launch_types.inc"
 
 #define TITLE_A "PPSA03527"
@@ -56,6 +57,23 @@ static bool sm_shellcore_title_is_protected(const char *title) {
 }
 static void sm_fakelib_game_on_launch_failed(const char *title) { (void)title; }
 static void sm_pkg_backport_on_launch_failed(const char *title) { (void)title; }
+// PS4 profile/memory hooks are neutral here: no title opts into a PS4 policy.
+static uint8_t sm_config_get_title_ps4_policy(const char *title, uint64_t *revision) {
+  (void)title; *revision = 0; return 0;
+}
+static int sm_ps4_memory_on_launch(const char *title, uint8_t policy) {
+  (void)title; (void)policy; return 0;
+}
+static bool sm_ps4_profiles_apply_title(const char *title, bool launching,
+                                        uint8_t policy, uint64_t revision) {
+  (void)title; (void)launching; (void)policy; (void)revision; return true;
+}
+static void sm_ps4_memory_launch_failed(const char *title, bool pending) {
+  (void)title; (void)pending;
+}
+static bool sm_game_lifecycle_background_title(char title[MAX_TITLE_ID]) {
+  title[0] = '\0'; return true;
+}
 
 #include "launch_helpers.inc"
 

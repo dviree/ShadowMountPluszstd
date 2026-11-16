@@ -1,6 +1,7 @@
 #ifndef SM_TYPES_H
 #define SM_TYPES_H
 
+#include "sm_patch_sources.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -139,11 +140,28 @@ typedef struct {
   sm_fakelib_mode_t mode;
 } sm_fakelib_rule_t;
 
+typedef enum {
+  SM_PS4_DEFAULT = 0,
+  SM_PS4_OFF,
+  SM_PS4_ON,
+} sm_ps4_setting_t;
+
+typedef struct {
+  sm_ps4_setting_t pro, cpu, gpu, memory, video_120hz;
+  uint32_t gpu_mhz; // 0: existing GPU policy, 2350: explicit target.
+} sm_ps4_settings_t;
+
+typedef struct {
+  char title_id[MAX_TITLE_ID];
+  sm_ps4_settings_t settings;
+} sm_ps4_rule_t;
+
 typedef struct runtime_config {
   bool api_enabled;
   bool debug_enabled;
   bool quiet_mode;
   bool library_sync_notification;
+  bool child_mode;
   bool mount_read_only;
   bool force_mount;
   bool persistent_image_mounts;
@@ -155,6 +173,13 @@ typedef struct runtime_config {
   bool global_fakelib_game_priority;
   bool update_emulators_enabled;
   bool auto_update_ampr_enabled;
+  sm_patch_source_config_t patch_sources;
+  bool ps4_force_pro;
+  bool ps4_cpu_boost;
+  bool ps4_gpu_boost;
+  uint64_t ps4_revision; // Runtime publication version; never persisted.
+  uint32_t ps4_rule_count;
+  sm_ps4_rule_t ps4_rules[MAX_PS4_PROFILE_RULES];
   char api_bind_address[MAX_API_BIND_ADDRESS];
   uint32_t api_port;
   char global_fakelib_path[MAX_PATH];

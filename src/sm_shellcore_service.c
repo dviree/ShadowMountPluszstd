@@ -6,12 +6,15 @@
 #include <sys/un.h>
 
 #include "sm_filesystem.h"
+#include "sm_config_mount.h"
 #include "sm_fakelib.h"
 #include "sm_game_lifecycle.h"
 #include "sm_gameinfo.h"
 #include "sm_image.h"
 #include "sm_limits.h"
 #include "sm_log.h"
+#include "sm_ps4_profiles.h"
+#include "sm_ps4_memory.h"
 #include "sm_path_utils.h"
 #include "sm_pkg_backport.h"
 #include "sm_runtime.h"
@@ -26,7 +29,7 @@ _Static_assert(MAX_TITLE_ID == SM_SHELLCORE_REQUEST_TITLE_ID_SIZE,
                "ShellCore title id size mismatch");
 _Static_assert(sizeof(sm_shellcore_request_t) == SM_SHELLCORE_REQUEST_SIZE,
                "unexpected ShellCore request size");
-_Static_assert(offsetof(sm_shellcore_request_t, title_id) == 8,
+_Static_assert(offsetof(sm_shellcore_request_t, title_id) == SM_SHELLCORE_REQUEST_TITLE_OFFSET,
                "unexpected ShellCore request title id offset");
 _Static_assert(sizeof(sm_shellcore_response_t) == SM_SHELLCORE_RESPONSE_SIZE,
                "unexpected ShellCore response size");
@@ -52,6 +55,7 @@ typedef struct {
   bool stop_requested;
   int listen_fd;
   int client_fd;
+  uint64_t session_id;
   // The incoming title is mounted before launchApp closes the outgoing game.
   shellcore_mount_owner_t prepared;
   shellcore_mount_owner_t outgoing;
@@ -59,6 +63,7 @@ typedef struct {
   bool launch_pending;
   char pending_launch_title_id[MAX_TITLE_ID];
   bool pending_sandbox_ready_handled;
+  bool pending_memory_8gb;
   bool external_mutation_in_progress;
   char releasing_title_id[MAX_TITLE_ID];
 } shellcore_service_state_t;
@@ -546,16 +551,26 @@ bool sm_shellcore_ensure_title_runtime(const char *title_id) {
 }
 
 static int handle_launch_request(const char *title_id) {
+  // System launches preserve the game's pending identity and selected policy.
+  if (!is_supported_game_title_id(title_id))
+    return EINVAL;
+  uint64_t revision;
+  uint8_t policy = sm_config_get_title_ps4_policy(title_id, &revision);
+  if (sm_ps4_memory_on_launch(title_id, policy))
+    return SM_SHELLCORE_MEMORY_DENIED;
+  bool profile_ready = sm_ps4_profiles_apply_title(title_id, true, policy, revision);
+  if (!profile_ready && (policy & 8u)) {
+    sm_ps4_memory_launch_failed(title_id, true);
+    return SM_SHELLCORE_MEMORY_DENIED;
+  }
   pthread_mutex_lock(&g_service.mutex);
   bool was_busy = launch_preparation_pending_locked();
-  g_service.pending_launch_title_id[0] = '\0';
   g_service.pending_sandbox_ready_handled = false;
-  if (is_supported_game_title_id(title_id)) {
-    (void)strlcpy(g_service.pending_launch_title_id, title_id,
-                  sizeof(g_service.pending_launch_title_id));
-    if (mount_owner_matches(&g_service.prepared, title_id))
-      g_service.prepared.sandbox_ready_handled = false;
-  }
+  g_service.pending_memory_8gb = (policy & 8u) != 0;
+  (void)strlcpy(g_service.pending_launch_title_id, title_id,
+                sizeof(g_service.pending_launch_title_id));
+  if (mount_owner_matches(&g_service.prepared, title_id))
+    g_service.prepared.sandbox_ready_handled = false;
   bool changed = was_busy != launch_preparation_pending_locked();
   pthread_mutex_unlock(&g_service.mutex);
   if (changed)
@@ -574,6 +589,7 @@ static int handle_launch_request(const char *title_id) {
       if (!g_service.prepare_in_progress && !g_service.launch_pending &&
           strcmp(g_service.pending_launch_title_id, title_id) == 0) {
         g_service.pending_launch_title_id[0] = '\0';
+        g_service.pending_memory_8gb = false;
         g_service.pending_sandbox_ready_handled = false;
       }
       changed = was_busy != launch_preparation_pending_locked();
@@ -586,6 +602,12 @@ static int handle_launch_request(const char *title_id) {
     if (status != ENOENT && status != EINVAL) {
       log_debug("  [SHELLCORE] launch mount unavailable: %s status=%d (%s)",
                 title_id, status, strerror(status));
+      // The pending memory policy may have been retired with the mount owner.
+      // Do not start an opted-in game without its mandatory pre-spawn barrier.
+      if (policy & 8u) {
+        sm_ps4_memory_launch_failed(title_id, true);
+        return SM_SHELLCORE_MEMORY_DENIED;
+      }
     }
     return status;
   }
@@ -802,6 +824,7 @@ bool sm_shellcore_service_bind_prepared_app(const char *title_id,
   }
   if (strcmp(g_service.pending_launch_title_id, title_id) == 0) {
     g_service.pending_launch_title_id[0] = '\0';
+    g_service.pending_memory_8gb = false;
     g_service.pending_sandbox_ready_handled = false;
   }
   bool changed = was_busy != launch_preparation_pending_locked();
@@ -1105,13 +1128,13 @@ static int handle_launch_failed_request(const char *title_id) {
   if (!title_id || title_id[0] == '\0')
     return 0;
 
-  sm_fakelib_game_on_launch_failed(title_id);
-  sm_pkg_backport_on_launch_failed(title_id);
-
   pthread_mutex_lock(&g_service.mutex);
   bool was_busy = launch_preparation_pending_locked();
-  if (strcmp(g_service.pending_launch_title_id, title_id) == 0) {
+  bool pending_launch = strcmp(g_service.pending_launch_title_id, title_id) == 0;
+  bool restore_profile = pending_launch || !g_service.pending_launch_title_id[0];
+  if (pending_launch) {
     g_service.pending_launch_title_id[0] = '\0';
+    g_service.pending_memory_8gb = false;
     g_service.pending_sandbox_ready_handled = false;
   }
   bool prepared = mount_owner_matches(&g_service.prepared, title_id);
@@ -1121,6 +1144,16 @@ static int handle_launch_failed_request(const char *title_id) {
   bool switch_pending = prepared && g_service.outgoing.title_id[0] != '\0';
   bool changed = was_busy != launch_preparation_pending_locked();
   pthread_mutex_unlock(&g_service.mutex);
+  sm_ps4_memory_launch_failed(title_id, pending_launch);
+  if (restore_profile && is_supported_game_title_id(title_id)) {
+    char active_title[MAX_TITLE_ID] = {0};
+    (void)sm_game_lifecycle_background_title(active_title);
+    uint64_t revision;
+    uint8_t policy = sm_config_get_title_ps4_policy(active_title, &revision);
+    (void)sm_ps4_profiles_apply_title(active_title, false, policy, revision);
+  }
+  sm_fakelib_game_on_launch_failed(title_id);
+  sm_pkg_backport_on_launch_failed(title_id);
   if (changed)
     sm_scanner_wake();
   if (!prepared)
@@ -1155,13 +1188,14 @@ static bool shellcore_client_active(int fd) {
   return active;
 }
 
-static int handle_sandbox_ready_request(const char *title_id) {
+static int handle_sandbox_ready_request(const char *title_id, uint32_t app_id) {
   if (runtime_sleep_mode_active())
     return EBUSY;
 
   char effective_title_id[MAX_TITLE_ID] = {0};
   bool already_handled = false;
   bool pending_launch = false;
+  bool memory_requested = false;
   pthread_mutex_lock(&g_service.mutex);
   if (title_id && is_supported_game_title_id(title_id)) {
     (void)strlcpy(effective_title_id, title_id,
@@ -1178,6 +1212,7 @@ static int handle_sandbox_ready_request(const char *title_id) {
   pending_launch =
       effective_title_id[0] != '\0' &&
       strcmp(g_service.pending_launch_title_id, effective_title_id) == 0;
+  memory_requested = pending_launch && g_service.pending_memory_8gb;
   shellcore_mount_owner_t *owner =
       find_mount_owner_locked(effective_title_id);
   if (pending_launch)
@@ -1186,6 +1221,14 @@ static int handle_sandbox_ready_request(const char *title_id) {
     already_handled = owner->sandbox_ready_handled;
   pthread_mutex_unlock(&g_service.mutex);
 
+  // The pre-spawn callback holds the actual appId, unlike the selected title
+  // token. Do not give an unrelated/system process the game's DATA increment.
+  int memory_status = sm_ps4_memory_prepare(
+      pending_launch ? effective_title_id : NULL, app_id, memory_requested);
+  if (memory_status == ENOENT)
+    return 0; // Unrelated system Spawn2 must not consume the pending game.
+  if (memory_status)
+    return SM_SHELLCORE_MEMORY_DENIED;
   if (effective_title_id[0] == '\0' || already_handled)
     return 0;
 
@@ -1224,29 +1267,56 @@ static void handle_client(int fd) {
   if (!shellcore_client_active(fd))
     return;
 
+  pthread_mutex_lock(&g_service.mutex);
+  uint64_t session_id = g_service.session_id;
+  pthread_mutex_unlock(&g_service.mutex);
+  sm_shellcore_response_t response = sm_shellcore_response(session_id,
+      SM_SHELLCORE_REQUEST_HELLO_VALUE, 0, 0);
+  if (!sm_socket_write_full(fd, &response, sizeof(response))) return;
   sm_shellcore_request_t request;
-  sm_shellcore_response_t response;
-  if (!sm_socket_read_full(fd, &request, sizeof(request)))
+  if (!sm_socket_read_full(fd, &request, sizeof(request)) || !shellcore_client_active(fd))
     return;
-  if (!shellcore_client_active(fd))
-    return;
-  if (request.magic != SM_SHELLCORE_PROTOCOL_MAGIC ||
-      request.version != SM_SHELLCORE_PROTOCOL_VERSION ||
-      ((request.operation == SM_SHELLCORE_REQUEST_LAUNCH ||
-        request.operation == SM_SHELLCORE_REQUEST_LAUNCH_FAILED ||
-        request.operation == SM_SHELLCORE_REQUEST_SANDBOX_READY) &&
-       strnlen(request.title_id, sizeof(request.title_id)) ==
-           sizeof(request.title_id))) {
-    response.status = EPROTO;
-  } else if (request.operation == SM_SHELLCORE_REQUEST_LAUNCH) {
-    response.status = handle_launch_request(request.title_id);
-  } else if (request.operation == SM_SHELLCORE_REQUEST_LAUNCH_FAILED) {
-    response.status = handle_launch_failed_request(request.title_id);
-  } else if (request.operation == SM_SHELLCORE_REQUEST_SANDBOX_READY) {
-    response.status = handle_sandbox_ready_request(request.title_id);
-  } else {
-    response.status = ENOTSUP;
+  int status = EPROTO;
+  if (sm_shellcore_request_valid(&request, session_id)) {
+    if (request.operation == SM_SHELLCORE_REQUEST_PROCESS_SPAWNED) {
+      if (request.pid <= 0 || request.app_id || request.module_handle ||
+          request.title_id[0]) {
+        status = EINVAL;
+      } else {
+        status = sm_game_lifecycle_note_process_spawned(request.pid) ? 0 :
+                 EAGAIN;
+      }
+    } else if (request.operation == SM_SHELLCORE_REQUEST_VIDEO_READY) {
+      uint32_t handle = 0;
+      app_info_t info = {0};
+      uint64_t revision = 0;
+      if (request.pid <= 0 || request.app_id || request.title_id[0] ||
+          request.module_handle == 0) {
+        status = EINVAL;
+      } else if (sceKernelGetAppInfo(request.pid, &info) != 0 ||
+                 !sm_config_is_ps4_title(info.title_id) ||
+                 !(sm_config_get_title_ps4_policy(info.title_id, &revision) & 32u) ||
+                 kernel_dynlib_handle(request.pid, "libSceVideoOut.sprx",
+                                      &handle) != 0 ||
+                 handle != request.module_handle) {
+        status = ENOENT;
+      } else {
+        status = sm_game_lifecycle_note_video_ready(request.pid) ? 0 : EAGAIN;
+      }
+    } else if (request.pid || request.module_handle ||
+        (request.app_id && request.operation != SM_SHELLCORE_REQUEST_SANDBOX_READY)) {
+      status = EINVAL; // Existing ShellCore operations have no target process.
+    } else if (request.operation == SM_SHELLCORE_REQUEST_LAUNCH) {
+      status = handle_launch_request(request.title_id);
+    } else if (request.operation == SM_SHELLCORE_REQUEST_LAUNCH_FAILED) {
+      status = handle_launch_failed_request(request.title_id);
+    } else if (request.operation == SM_SHELLCORE_REQUEST_SANDBOX_READY) {
+      status = handle_sandbox_ready_request(NULL, request.app_id);
+    } else {
+      status = ENOTSUP;
+    }
   }
+  response = sm_shellcore_response(session_id, request.operation, request.request_id, status);
   if (shellcore_client_active(fd))
     (void)sm_socket_write_full(fd, &response, sizeof(response));
 }
@@ -1389,12 +1459,15 @@ bool sm_shellcore_service_start(void) {
 
   g_service.listen_fd = fd;
   g_service.client_fd = -1;
+  arc4random_buf(&g_service.session_id, sizeof(g_service.session_id));
+  if (!g_service.session_id) g_service.session_id = 1;
   g_service.stop_requested = false;
   clear_mount_owner(&g_service.prepared);
   clear_mount_owner(&g_service.outgoing);
   g_service.prepare_in_progress = false;
   g_service.launch_pending = false;
   g_service.pending_launch_title_id[0] = '\0';
+  g_service.pending_memory_8gb = false;
   g_service.pending_sandbox_ready_handled = false;
   g_service.external_mutation_in_progress = false;
   g_service.releasing_title_id[0] = '\0';
@@ -1439,6 +1512,7 @@ void sm_shellcore_service_stop(void) {
   g_service.prepare_in_progress = false;
   g_service.launch_pending = false;
   g_service.pending_launch_title_id[0] = '\0';
+  g_service.pending_memory_8gb = false;
   g_service.pending_sandbox_ready_handled = false;
   g_service.external_mutation_in_progress = false;
   g_service.releasing_title_id[0] = '\0';

@@ -385,12 +385,34 @@ paths:
     post:
       operationId: getGameInfo
       summary: Get detailed metadata and size for a folder, image or installed PKG
+      description: With runtime_only=true, return only status, title_id and observed active state without checking installation or scanning sizes and content.
       tags: [Games]
       requestBody:
-        $ref: "#/components/requestBodies/TitleRequest"
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/TitleRequest"
+                - type: object
+                  properties:
+                    runtime_only: {type: boolean, default: false}
       responses:
         "200":
-          $ref: "#/components/responses/GameInfoSuccess"
+          description: Detailed information, or a lightweight runtime state when requested
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/GameInfoResponse"
+                  - type: object
+                    required: [status, title_id, active]
+                    properties:
+                      status: {type: integer, const: 0}
+                      title_id: {$ref: "#/components/schemas/TitleId"}
+                      active: {type: boolean}
+                      patches_applied: {type: boolean}
+                      cheats_applied: {type: boolean}
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -399,6 +421,216 @@ paths:
           $ref: "#/components/responses/Busy"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /api/v1/games/ps4-profile:
+    options:
+      operationId: preflightGamePs4Profile
+      tags: [Games]
+      responses:
+        "204":
+          $ref: "#/components/responses/Preflight"
+    post:
+      operationId: setGamePs4Profile
+      summary: Set per-game PS4 Pro, CPU/GPU and optional memory launch overrides
+      tags: [Games]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Ps4ProfileOverride"
+                - type: object
+                  required: [title_id]
+                  properties:
+                    title_id:
+                      type: string
+                      pattern: "^(CUSA|PLAS|PCAS|PCJS|PLJS|PLJM|PCKS)[0-9]{5}$"
+      responses:
+        "200":
+          description: Saved; applies on the next launch. All default removes the override.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: integer, const: 0}
+                  title_id: {type: string}
+                  saved: {type: boolean, const: true}
+                  applies_on_next_launch: {type: boolean, const: true}
+                  ps4_profile:
+                    $ref: "#/components/schemas/Ps4ProfileOverride"
+                  ps4_profile_default:
+                    $ref: "#/components/schemas/Ps4ProfileValues"
+                  ps4_profile_effective:
+                    $ref: "#/components/schemas/Ps4ProfileValues"
+                  ps4_memory_supported:
+                    type: boolean
+                    description: Exact audited firmware layout available; activation is verified at launch.
+                  ps4_memory_status:
+                    $ref: "#/components/schemas/Ps4MemoryStatus"
+        "400":
+          description: Invalid title or setting
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/games/patches:
+    options:
+      operationId: preflightGameXmlPatches
+      tags: [Games]
+      responses:
+        "204":
+          $ref: "#/components/responses/Preflight"
+    post:
+      operationId: gameXmlPatches
+      summary: List patches and cheats, save startup selections, or toggle a live cheat
+      tags: [Games]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title_id]
+              properties:
+                title_id:
+                  $ref: "#/components/schemas/TitleId"
+                id:
+                  type: string
+                  pattern: "^[0-9a-f]{16}$"
+                  description: Together with enabled, updates one catalog entry.
+                enabled:
+                  type: boolean
+                  description: Enabling includes required cheats. A required entry cannot be disabled while its dependents are enabled in the selected live or startup mode.
+                apply:
+                  type: boolean
+                  default: false
+                  description: Apply a cheat and missing dependencies in one transaction through the lifecycle owner. Requires id and enabled; does not save startup selection. XML remains startup-only.
+      responses:
+        "200":
+          description: Catalog with effective startup dependencies and observed live state; defaults are off. Unsupported or incompatible entries can only be disabled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: integer, const: 0}
+                  title_id: {type: string}
+                  version: {type: string}
+                  directory: {type: string}
+                  cheat_directory: {type: string}
+                  has_patches: {type: boolean}
+                  has_cheats: {type: boolean}
+                  patches_applied: {type: boolean}
+                  cheats_applied: {type: boolean}
+                  patches_enabled: {type: boolean}
+                  cheats_enabled: {type: boolean}
+                  saved: {type: boolean}
+                  applies_on_next_launch: {type: boolean}
+                  patches:
+                    type: array
+                    maxItems: 256
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                        author: {type: string}
+                        note: {type: string}
+                        app_version: {type: string}
+                        module: {type: string}
+                        format: {type: string, enum: [XML, JSON, SHN, MC4]}
+                        file: {type: string, description: Source filename; deleting this file removes all its entries.}
+                        file_deletable: {type: boolean, description: Local file; internet-catalog files cannot be deleted.}
+                        master_id: {type: string}
+                        button: {type: boolean}
+                        applied: {type: boolean}
+                        requires: {type: string}
+                        error: {type: string}
+                        enabled: {type: boolean}
+                        compatible:
+                          type: boolean
+                          description: The declared version matches, or every compiled write resolves its address by signature scan.
+                        version_matched:
+                          type: boolean
+                          description: The declared version matches; mask is treated as universal only for signature-based entries.
+                        signature_based:
+                          type: boolean
+                          description: All compiled writes use runtime signature scans; fixed or mixed address records are false.
+                        supported: {type: boolean}
+                        line_count: {type: integer}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/games/patches/upload:
+    options:
+      operationId: preflightPatchUpload
+      summary: CORS preflight
+      tags: [Games]
+      responses:
+        "204": {$ref: "#/components/responses/Preflight"}
+    post:
+      operationId: uploadPatchFile
+      summary: Validate and add a local XML patch or JSON/SHN/MC4 cheat file
+      description: Writes to patches or cheats, prefixing title_id when absent from the filename. Existing files are never overwritten. Disabled in child mode.
+      tags: [Games]
+      parameters:
+        - in: query
+          name: title_id
+          required: true
+          schema: {$ref: "#/components/schemas/TitleId"}
+        - in: query
+          name: filename
+          required: true
+          schema: {type: string, maxLength: 200}
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary, maxLength: 4194304}
+      responses:
+        "200": {description: File validated and published; subsequent catalog reads include it.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {description: Child mode is enabled or storage is not writable.}
+        "409": {description: A file with this name already exists.}
+        "413": {description: File exceeds 4 MiB.}
+        "500": {$ref: "#/components/responses/InternalError"}
+
+  /api/v1/games/patches/delete:
+    options:
+      operationId: preflightPatchDelete
+      summary: CORS preflight
+      tags: [Games]
+      responses:
+        "204": {$ref: "#/components/responses/Preflight"}
+    post:
+      operationId: deletePatchFile
+      summary: Delete the source file of a catalog entry
+      description: Removes all entries in a local file and invalidates its index. Internet-catalog files are protected. Refused while a game is running or child mode is enabled.
+      tags: [Games]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title_id, id]
+              properties:
+                title_id: {$ref: "#/components/schemas/TitleId"}
+                id: {type: string, pattern: "^[0-9a-f]{16}$"}
+      responses:
+        "200": {description: File deleted; subsequent catalog reads reflect the change.}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "403": {description: Internet-catalog file is protected, child mode is enabled, or storage is not writable.}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {description: A game is running.}
+        "500": {$ref: "#/components/responses/InternalError"}
 
   /api/v1/games/fakelib:
     options:
@@ -551,6 +783,50 @@ paths:
                 $ref: "#/components/schemas/SettingsResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/settings/patches:
+    options:
+      operationId: preflightPatchSources
+      tags: [Settings]
+      responses:
+        "204":
+          $ref: "#/components/responses/Preflight"
+    post:
+      operationId: patchSources
+      summary: Configure patch and cheat ZIP sources, scheduling, and manual updates
+      tags: [Settings]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action: {type: string, enum: [status, save, update], default: status}
+                interval_hours:
+                  type: integer
+                  minimum: 0
+                  maximum: 8760
+                  description: Required for save. Zero selects manual updates only.
+                sources:
+                  type: array
+                  maxItems: 12
+                  description: Required for save. Empty disables all sources. ZIP archives only.
+                  items:
+                    type: object
+                    required: [type, url]
+                    properties:
+                      type: {type: string, enum: [cheats, patches]}
+                      url: {type: string, maxLength: 1023, format: uri}
+      responses:
+        "200":
+          description: Sources, built-in presets, interval_hours, saved, queued, running, last_error and last_check (Unix seconds). Configuration reload is asynchronous. Manual updates wait for idle; unchanged archives are not rewritten.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: An update is already queued or running.
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -839,6 +1115,78 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/games/launch:
+    options:
+      operationId: preflightLaunchGame
+      tags: [Games]
+      responses:
+        "204":
+          $ref: "#/components/responses/Preflight"
+    post:
+      operationId: launchGame
+      summary: Request a known game's launch for the foreground user
+      description: Refuses while a game is open or an installation is pending. Observe active state through game information after acceptance.
+      tags: [Games]
+      requestBody:
+        $ref: "#/components/requestBodies/TitleRequest"
+      responses:
+        "200":
+          description: Launch request accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, title_id, accepted]
+                properties:
+                  status: {type: integer, const: 0}
+                  title_id: {$ref: "#/components/schemas/TitleId"}
+                  accepted: {type: boolean, const: true}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: No foreground user is available
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Busy"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/games/close:
+    options:
+      operationId: preflightCloseGame
+      tags: [Games]
+      responses:
+        "204":
+          $ref: "#/components/responses/Preflight"
+    post:
+      operationId: closeGame
+      summary: Request closing the running game by title ID
+      description: Refuses if the running application's title does not match. Acceptance does not mean shutdown has completed.
+      tags: [Games]
+      requestBody:
+        $ref: "#/components/requestBodies/TitleRequest"
+      responses:
+        "200":
+          description: Close request accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, title_id, accepted]
+                properties:
+                  status: {type: integer, const: 0}
+                  title_id: {$ref: "#/components/schemas/TitleId"}
+                  accepted: {type: boolean, const: true}
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Busy"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/games/mount:
     options:
       operationId: preflightMountGame
@@ -924,7 +1272,20 @@ paths:
       summary: Request game uninstallation
       tags: [Games]
       requestBody:
-        $ref: "#/components/requestBodies/TitleRequest"
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [title_id]
+              properties:
+                title_id:
+                  $ref: "#/components/schemas/TitleId"
+                reinstall:
+                  type: boolean
+                  default: false
+                  description: Require an available non-PKG source, preserve manual sources and queue reinstallation through the scanner.
       responses:
         "200":
           $ref: "#/components/responses/UninstallSuccess"
@@ -1707,7 +2068,7 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     PayloadTooLarge:
-      description: JSON request body exceeds 4096 bytes
+      description: JSON request body exceeds 16384 bytes
       headers:
         Access-Control-Allow-Origin:
           $ref: "#/components/headers/AllowOrigin"
@@ -1870,6 +2231,44 @@ components:
           format: int64
           minimum: 1
 
+    Ps4ProfileOverride:
+      type: object
+      required: [pro, cpu, gpu]
+      properties:
+        pro: {type: string, enum: [default, "on", "off"]}
+        cpu: {type: string, enum: [default, "on", "off"]}
+        gpu: {type: string, enum: [default, "on", "off"]}
+        memory:
+          type: string
+          enum: [default, "on", "off"]
+          description: Per-game 8 GB mode. Default is off. Requires Pro mode; explicit pro=off conflicts. Omission preserves the saved value.
+        video_120hz:
+          type: string
+          enum: [default, "on", "off"]
+          description: Request 120 Hz video output at the next PS4 launch. Default off; omission preserves.
+        gpu_clock:
+          type: string
+          enum: [default, "2350"]
+          description: Explicit GPU target. 2350 forces the GPU policy independently of gpu; omission preserves.
+    Ps4ProfileValues:
+      type: object
+      required: [pro, cpu, gpu]
+      properties:
+        pro: {type: boolean}
+        cpu: {type: boolean}
+        gpu: {type: boolean}
+        memory: {type: boolean}
+        video_120hz: {type: boolean}
+        gpu_clock:
+          type: integer
+          enum: [0, 2200, 2350]
+          description: Resolved GPU target in MHz (0 for stock); default object uses 0 for no explicit target.
+
+    Ps4MemoryStatus:
+      type: string
+      enum: ["off", pending, active, blocked]
+      description: Cached state of the physical container budget. Close the game before launching another or stopping ShadowMount.
+
     SettingsUpdateRequest:
       type: object
       required: [debug, quiet_mode, update_emulators, allow_lan_access, fan_target_temperature, scan_paths]
@@ -1878,12 +2277,27 @@ components:
           type: boolean
         quiet_mode:
           type: boolean
+        child_mode:
+          type: boolean
+          description: Hide game file and installation operations in the web interface. Omission preserves the current value; default is false.
         update_emulators:
           type: boolean
         fakelib_default_mode:
           type: string
           enum: [full, emulators, disabled]
           description: Mode inherited by games without an individual override. Initial default is full. Omission preserves the current value; changes apply on the next launch.
+        ps4_force_pro:
+          type: boolean
+          default: false
+          description: Force PS4 Pro compatibility on the next game launch. Omission preserves the current value.
+        ps4_cpu_boost:
+          type: boolean
+          default: false
+          description: Request Pstate 0 in PS4 game profiles. Omission preserves the current value.
+        ps4_gpu_boost:
+          type: boolean
+          default: false
+          description: Request 2200 MHz in PS4 game profiles. Omission preserves the current value.
         auto_update_ampr:
           type: boolean
           description: Download libSceAmpr.sprx updates from the configured GitHub release URL. Omission preserves the current value for compatibility with older web clients.
@@ -1989,8 +2403,8 @@ components:
           type: array
           items:
             type: string
-            enum: [web_ui, storage_space, storage_eject, list_images, list_games, game_info, game_data_sizes, pkg_install, pkg_browser_stream, smb2_smb3, game_icon, mount_game, unmount_game, uninstall_game, uninstall_game_content, install_game_source, move_game_source, copy_game_source, delete_game_source, unpack_game_image, storage_job_status, storage_job_cancel, list_manual_sources, add_manual_source, remove_manual_source, manage_settings, read_debug_log, read_kernel_log, rescan]
-          example: [web_ui, storage_space, storage_eject, list_images, list_games, game_info, game_data_sizes, pkg_install, pkg_browser_stream, smb2_smb3, game_icon, mount_game, unmount_game, uninstall_game, uninstall_game_content, install_game_source, move_game_source, copy_game_source, delete_game_source, unpack_game_image, storage_job_status, storage_job_cancel, list_manual_sources, add_manual_source, remove_manual_source, manage_settings, read_debug_log, read_kernel_log, rescan]
+            enum: [web_ui, storage_space, storage_eject, list_images, list_games, installed_pkg_games, game_fakelib_settings, game_ps4_profiles, game_ps4_memory, game_info, game_data_sizes, pkg_install, pkg_browser_stream, smb2_smb3, game_icon, mount_game, unmount_game, uninstall_game, uninstall_game_content, install_game_source, move_game_source, copy_game_source, delete_game_source, unpack_game_image, storage_job_status, storage_job_cancel, list_manual_sources, add_manual_source, remove_manual_source, manage_settings, read_debug_log, read_kernel_log, rescan]
+          example: [web_ui, storage_space, storage_eject, list_images, list_games, installed_pkg_games, game_fakelib_settings, game_ps4_profiles, game_ps4_memory, game_info, game_data_sizes, pkg_install, pkg_browser_stream, smb2_smb3, game_icon, mount_game, unmount_game, uninstall_game, uninstall_game_content, install_game_source, move_game_source, copy_game_source, delete_game_source, unpack_game_image, storage_job_status, storage_job_cancel, list_manual_sources, add_manual_source, remove_manual_source, manage_settings, read_debug_log, read_kernel_log, rescan]
 
     StorageMount:
       type: object
@@ -2238,6 +2652,32 @@ components:
         last_access_time:
           type: string
           description: AppInfoJson #_last_access_time value, falling back to app.db lastAccessTime, or an empty string.
+        active:
+          type: boolean
+          description: The game's process is currently running, including in the background.
+        has_patches:
+          type: boolean
+          description: Compatible supported XML patches are available, or a patch is currently applied.
+        has_cheats:
+          type: boolean
+          description: Compatible supported cheats are available, or a cheat is currently applied.
+        patches_applied:
+          type: boolean
+          description: XML patches have actually been applied in the current game session; startup selections alone do not set this.
+        cheats_applied:
+          type: boolean
+          description: Cheats have actually been applied in the current game session; startup selections alone do not set this.
+        patches_enabled:
+          type: boolean
+          description: Compatible supported XML patches are selected for application at launch.
+        cheats_enabled:
+          type: boolean
+          description: Compatible supported cheats are selected for application at launch.
+        play_time_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Foreground console user's system play-time total; omitted when unavailable.
         install_time:
           type: string
           description: AppInfoJson #_install_time value, falling back to app.db installTime, or an empty string.
@@ -2265,6 +2705,20 @@ components:
         can_manage_source:
           type: boolean
           description: False for installed PKGs; source mutations are forbidden.
+        can_configure_ps4_profile:
+          type: boolean
+          description: True for supported PS4 title IDs, including installed PKGs.
+        ps4_profile:
+          $ref: "#/components/schemas/Ps4ProfileOverride"
+        ps4_profile_default:
+          $ref: "#/components/schemas/Ps4ProfileValues"
+        ps4_profile_effective:
+          $ref: "#/components/schemas/Ps4ProfileValues"
+        ps4_memory_supported:
+          type: boolean
+          description: Exact audited retail DATA layout available; not a runtime activation result.
+        ps4_memory_status:
+          $ref: "#/components/schemas/Ps4MemoryStatus"
         can_toggle_fakelib:
           type: boolean
           description: True for PS5 games in PKGs, images and folders.
@@ -2633,7 +3087,7 @@ components:
           const: true
         scan_queued:
           type: boolean
-          description: Full synchronization was queued because the known source was absent before uninstall; retained sources are not immediately rediscovered.
+          description: Full synchronization was queued for explicit reinstallation or because the known source was absent before uninstall.
         scan_deferred:
           type: boolean
         scan_deferred_reason:

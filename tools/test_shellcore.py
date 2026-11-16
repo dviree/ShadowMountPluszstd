@@ -17,23 +17,29 @@ def main():
     with tempfile.TemporaryDirectory(prefix='sm-shellcore-') as directory:
         build = Path(directory)
         source = (root / 'src/sm_shellcore_remote.c').read_text(encoding='utf-8')
-        function = re.search(r'^static int privileged_ptrace\([^;{]*\) \{.*?^\}',
-                             source, re.MULTILINE | re.DOTALL)
-        if not function:
-            raise RuntimeError('Cannot find privileged_ptrace')
-        (build / 'remote_ptrace.inc').write_text(function.group(0), encoding='utf-8')
+        functions = []
+        for name in ('privileged_ptrace', 'sm_remote_process_read', 'sm_remote_process_copyin'):
+            function = re.search(r'^(?:static )?(?:int|bool) '+name+r'\([^;{]*\) \{.*?^\}',
+                                 source, re.MULTILINE | re.DOTALL)
+            if not function:
+                raise RuntimeError('Cannot find '+name)
+            functions.append(function.group(0))
+        (build / 'remote_ptrace.inc').write_text('\n'.join(functions), encoding='utf-8')
         source = (root / 'src/sm_shellcore_hooks.c').read_text(encoding='utf-8')
         # Linux socket constants differ; inspect the bridge without executing it.
         source = re.sub(r'_Static_assert\((?:SOL_SOCKET|SO_SNDTIMEO|SO_RCVTIMEO)\b.*?;',
                         '', source, flags=re.DOTALL)
         (build / 'shellcore_hooks.inc').write_text(source, encoding='utf-8')
-        for test in ('remote', 'hooks'):
+        for test in ('remote', 'hooks', 'bridge'):
+            if args.sanitize and test == 'bridge':
+                # ASan cannot reliably instrument calls into a copied RX blob.
+                continue
             binary = build / test
             command = shlex.split(os.environ.get('CC', 'cc')) + [
                 '-std=gnu11', '-O1', '-g', '-pthread', '-Wall', '-Wextra', '-Werror',
                 '-I' + str(root / 'include'), '-I' + str(build),
                 str(root / ('tests/test_shellcore_' + test + '.c')), '-o', str(binary)]
-            if test == 'hooks':
+            if test in ('hooks', 'bridge'):
                 command += [str(root / 'src/sm_shellcore_bridge.S'), '-Wl,-z,noexecstack']
             if args.sanitize:
                 command += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']

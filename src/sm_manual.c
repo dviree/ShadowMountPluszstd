@@ -310,10 +310,12 @@ static bool parse_manual_status_line(char *line, manual_status_entry_t *entry) {
 static int load_manual_status(void) {
   FILE *f = fopen(MANUAL_STATUS_FILE, "r");
   if (!f) {
-    if (errno != ENOENT)
+    int status = errno;
+    if (status != ENOENT)
       log_debug("  [MANUAL] status open failed for %s: %s",
-                MANUAL_STATUS_FILE, strerror(errno));
-    return 0;
+                MANUAL_STATUS_FILE, strerror(status));
+    errno = status;
+    return status == ENOENT ? 0 : -1;
   }
 
   int count = 0;
@@ -322,7 +324,9 @@ static int load_manual_status(void) {
     if (count >= MANUAL_STATUS_CAPACITY) {
       log_debug("  [MANUAL] status limit reached (%d)",
                 MANUAL_STATUS_CAPACITY);
-      break;
+      fclose(f);
+      errno = EOVERFLOW;
+      return -1;
     }
     manual_status_entry_t entry;
     if (!parse_manual_status_line(line, &entry))
@@ -330,10 +334,16 @@ static int load_manual_status(void) {
     g_manual_status_entries[count++] = entry;
   }
 
-  if (ferror(f))
+  int read_error = ferror(f) ? (errno != 0 ? errno : EIO) : 0;
+  if (read_error)
     log_debug("  [MANUAL] status read failed for %s: %s",
-              MANUAL_STATUS_FILE, strerror(errno));
-  fclose(f);
+              MANUAL_STATUS_FILE, strerror(read_error));
+  if (fclose(f) != 0 && !read_error)
+    read_error = errno != 0 ? errno : EIO;
+  if (read_error) {
+    errno = read_error;
+    return -1;
+  }
   return count;
 }
 
@@ -479,6 +489,22 @@ static bool rewrite_manual_list_without_deleted_entries(int entry_count) {
   return true;
 }
 
+bool sm_manual_prepare_reinstall(const char *title_id) {
+  int entry_count = load_manual_status();
+  if (entry_count < 0)
+    return false;
+  bool changed = false;
+  for (int i = 0; i < entry_count; ++i) {
+    manual_status_entry_t *entry = &g_manual_status_entries[i];
+    if (entry->status != MANUAL_STATUS_UNKNOWN &&
+        strcmp(entry->title_id, title_id) == 0) {
+      entry->status = MANUAL_STATUS_UNKNOWN;
+      changed = true;
+    }
+  }
+  return !changed || write_manual_status(entry_count);
+}
+
 bool sm_manual_reconcile_deleted_titles(
     const struct AppDbTitleList *app_db_titles, bool app_db_titles_ready) {
   if (!app_db_titles_ready || !app_db_titles)
@@ -486,7 +512,7 @@ bool sm_manual_reconcile_deleted_titles(
 
   int entry_count = load_manual_status();
   if (entry_count <= 0)
-    return true;
+    return entry_count == 0;
 
   bool changed = false;
 
@@ -531,6 +557,8 @@ void sm_manual_note_installed(const char *manual_source_path,
   }
 
   int entry_count = load_manual_status();
+  if (entry_count < 0)
+    return;
   int index =
       find_manual_status_entry(entry_count, manual_source_path, title_id);
   if (index < 0) {
